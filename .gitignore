@@ -1,0 +1,7 @@
+# .gitignore
+*.o
+*.log
+*.pem
+bin/*
+!bin/server
+obj/

@@ -10,10 +10,11 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <pthread.h>
-
+#include "ssl_utils.h"
 // Global server değişkenleri
 volatile int server_running = 1;
 int server_fd;
+SSL_CTX *global_ssl_ctx = NULL;
 
 // Global client list ve mutex (client.c ile paylaşılacak)
 ClientNode *client_list_head = NULL;
@@ -43,6 +44,14 @@ int main(int argc, char *argv[]) {
     init_log("server.log");
     log_message("Server is starting up");
     
+    // Initialize SSL
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+    SSL_load_error_strings();
+    global_ssl_ctx = create_ssl_context(1); // 1 = server
+    configure_context(global_ssl_ctx, "cert.pem", "key.pem");
+
+
     // Komut satırı argümanlarını işle
     parse_arguments(argc, argv, &config);
     
@@ -123,29 +132,43 @@ int main(int argc, char *argv[]) {
             log_message("accept failed: %s", strerror(errno));
             continue;
         }
-        
+    
         ClientInfo *client = (ClientInfo *)malloc(sizeof(ClientInfo));
         if (!client) {
             perror("Failed to allocate memory for client");
             close(client_fd);
             continue;
         }
-        
+    
         client->client_fd = client_fd;
         client->client_addr = client_addr;
-        
+    
         add_client(client);
-        
-        if (pthread_create(&thread_id, NULL, handle_client, (void *)client) != 0) {
-            perror("pthread_create failed");
+    
+        ThreadArg *thread_arg = (ThreadArg *)malloc(sizeof(ThreadArg));
+        if (!thread_arg) {
+            perror("Failed to allocate memory for thread argument");
             remove_client(client->client_fd);
             free(client);
             close(client_fd);
             continue;
         }
-        
+    
+        thread_arg->client = client;
+        thread_arg->ssl_ctx = global_ssl_ctx;
+    
+        if (pthread_create(&thread_id, NULL, handle_client, (void *)thread_arg) != 0) {
+            perror("pthread_create failed");
+            remove_client(client->client_fd);
+            free(client);
+            free(thread_arg);
+            close(client_fd);
+            continue;
+        }
+    
         pthread_detach(thread_id);
     }
+    
     
     printf("Server shut down successfully\n");
     log_message("Server shut down successfully");
@@ -153,6 +176,10 @@ int main(int argc, char *argv[]) {
         close(server_fd);
     }
     
+    if (global_ssl_ctx) {
+        SSL_CTX_free(global_ssl_ctx);
+        global_ssl_ctx = NULL;
+    }    
     close_log();
     return 0;
 }
