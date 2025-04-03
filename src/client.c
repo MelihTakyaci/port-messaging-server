@@ -9,6 +9,11 @@
 #include <time.h>
 #include <openssl/sha.h>
 #include <sys/socket.h>
+#include "ssl_utils.h"
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/sha.h>
+
 
 // Global client list ve mutex tanımları (server.c’de de kullanılacak)
 extern ClientNode *client_list_head;
@@ -47,7 +52,7 @@ void broadcast_message(ClientInfo *sender, const char *message, int message_leng
     ClientNode *curr = client_list_head;
     while (curr) {
         if (curr->client->client_fd != sender->client_fd) {
-            if (send(curr->client->client_fd, message, message_length, 0) < 0) {
+            if (SSL_write(curr->client->ssl, message, message_length) <= 0) {
                 perror("Broadcast send failed");
             }
         }
@@ -57,36 +62,57 @@ void broadcast_message(ClientInfo *sender, const char *message, int message_leng
 }
 
 void *handle_client(void *arg) {
-    ClientInfo *client = (ClientInfo *)arg;
+    ThreadArg *thread_arg = (ThreadArg *)arg;
+    ClientInfo *client = thread_arg->client;
+    SSL_CTX *ctx = thread_arg->ssl_ctx;
+    free(thread_arg);
+
     char buffer[BUFFER_SIZE];
     int bytes_received;
     char client_ip[INET_ADDRSTRLEN];
-    
+
+    client->ssl = SSL_new(ctx);
+    if (!client->ssl || SSL_set_fd(client->ssl, client->client_fd) != 1) {
+        ERR_print_errors_fp(stderr);
+        close(client->client_fd);
+        free(client);
+        pthread_exit(NULL);
+    }
+
+    if (SSL_accept(client->ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        SSL_free(client->ssl);
+        close(client->client_fd);
+        free(client);
+        pthread_exit(NULL);
+    }
+
+    // Log client IP
     inet_ntop(AF_INET, &(client->client_addr.sin_addr), client_ip, INET_ADDRSTRLEN);
     printf("Client connected from %s:%d\n", client_ip, ntohs(client->client_addr.sin_port));
     log_message("Client connected from %s:%d", client_ip, ntohs(client->client_addr.sin_port));
-    
-    // Rate limiting için başlangıç ayarları
+
+    // Rate limiting setup
     client->window_start = time(NULL);
     client->request_count = 0;
-    
-    while ((bytes_received = recv(client->client_fd, buffer, BUFFER_SIZE - 1, 0)) > 0) {
+
+    while ((bytes_received = SSL_read(client->ssl, buffer, BUFFER_SIZE - 1)) > 0) {
         buffer[bytes_received] = '\0';
-        
-        // Rate limiting: 10 saniyede maksimum 15 istek
+
+        // Rate limiting: 10 seconds window, max 15 requests
         time_t now = time(NULL);
         if (now - client->window_start >= 10) {
             client->window_start = now;
             client->request_count = 0;
         }
         if (client->request_count >= 15) {
-            char *limit_msg = "Rate limit exceeded. Please wait 10 seconds before sending more messages.\n";
-            send(client->client_fd, limit_msg, strlen(limit_msg), 0);
+            const char *limit_msg = "Rate limit exceeded. Please wait 10 seconds before sending more messages.\n";
+            SSL_write(client->ssl, limit_msg, strlen(limit_msg));
             continue;
         }
         client->request_count++;
-        
-        // Gelen verinin SHA256 hash'ini hesaplama (sadece loglama için)
+
+        // Calculate SHA256 of received message
         unsigned char hash[SHA256_DIGEST_LENGTH];
         SHA256((unsigned char*)buffer, bytes_received, hash);
         char hash_str[SHA256_DIGEST_LENGTH * 2 + 1];
@@ -94,28 +120,33 @@ void *handle_client(void *arg) {
             sprintf(&hash_str[i * 2], "%02x", hash[i]);
         }
         hash_str[SHA256_DIGEST_LENGTH * 2] = '\0';
-        
+
         log_message("Received from %s:%d: %s", client_ip, ntohs(client->client_addr.sin_port), buffer);
         log_message("Hash of received message: %s", hash_str);
-        
-        // Yayınlanacak mesajın hazırlanması
+
+        // Prepare broadcast message
         char broadcast_buffer[BUFFER_SIZE * 2];
         snprintf(broadcast_buffer, sizeof(broadcast_buffer),
                  "From %s:%d -> Message: %s\n",
                  client_ip, ntohs(client->client_addr.sin_port), buffer);
-        
+
         broadcast_message(client, broadcast_buffer, strlen(broadcast_buffer));
     }
-    
+
     if (bytes_received == 0) {
         printf("Client %s:%d disconnected\n", client_ip, ntohs(client->client_addr.sin_port));
         log_message("Client %s:%d disconnected", client_ip, ntohs(client->client_addr.sin_port));
     } else {
-        perror("recv failed");
-        log_message("recv failed for client %s:%d", client_ip, ntohs(client->client_addr.sin_port));
+        perror("SSL_read failed");
+        log_message("SSL_read failed for client %s:%d", client_ip, ntohs(client->client_addr.sin_port));
     }
-    
+
     remove_client(client->client_fd);
+
+    // Cleanup SSL
+    SSL_shutdown(client->ssl);
+    SSL_free(client->ssl);
+
     close(client->client_fd);
     free(client);
     pthread_exit(NULL);

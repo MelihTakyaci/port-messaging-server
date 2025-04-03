@@ -1,7 +1,7 @@
 # Compiler and flags
 CC = gcc
 CFLAGS = -Wall -g -pthread -Iinclude
-LDFLAGS = -pthread -lcrypto -lwebsockets
+LDFLAGS = -pthread -lcrypto -lwebsockets -lssl
 
 # Directories
 SRCDIR = src
@@ -10,7 +10,7 @@ OBJDIR = obj
 BINDIR = bin
 
 # Sources for the server executable
-SERVER_SRCS = $(SRCDIR)/server.c $(SRCDIR)/logging.c $(SRCDIR)/config.c $(SRCDIR)/client.c
+SERVER_SRCS = $(SRCDIR)/server.c $(SRCDIR)/logging.c $(SRCDIR)/config.c $(SRCDIR)/client.c $(SRCDIR)/ssl_utils.c
 SERVER_OBJS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(SERVER_SRCS))
 
 # Sources for the client executable (eğer ayrı bir main fonksiyonu varsa)
@@ -19,7 +19,7 @@ CLIENT_OBJS = $(patsubst $(SRCDIR)/%.c,$(OBJDIR)/%.o,$(CLIENT_SRCS))
 
 .PHONY: all clean
 
-all: server client
+all: server
 
 # Build server executable
 server: $(SERVER_OBJS)
@@ -47,5 +47,7 @@ test: tests/client_test
 
 # Clean build artifacts
 clean:
-	rm -rf $(OBJDIR) $(BINDIR)
-	@echo "Cleaned build artifacts"
+	rm -f $(OBJDIR)/*.o
+	rm -f $(BINDIR)/server
+	@echo "Cleaned build artifacts (but kept TLS keys)"
+
