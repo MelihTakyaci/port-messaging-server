@@ -71,7 +71,7 @@ Persistent client message queues
 👨‍💻 Author
 
 Melih Takyaci
-Email: you@example.com
+Email: melihtakyacib@gmail.com
 GitHub: @MelihTakyaci
 
 ⭐ Star the Repo
